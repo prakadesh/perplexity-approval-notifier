@@ -18,12 +18,10 @@ CHECK_INTERVAL  = 3
 TRIGGER_TEXTS   = ["Approve", "Deny", "waiting for input", "^Enter", "^Esc"]
 # ─────────────────────────────────────────────
 
-# Debug flag — set via --debug CLI arg
 DEBUG = False
 
 
 def ts() -> str:
-    """Timestamp prefix for all log lines."""
     return datetime.now().strftime("%H:%M:%S")
 
 
@@ -33,34 +31,34 @@ def log(level: str, msg: str):
     print(f"[{ts()}] {icon} [{level}] {msg}")
 
 
-def get_all_windows():
-    """Return list of all visible window titles on the system."""
+def get_perplexity_windows():
+    """
+    Return all windows whose title matches Perplexity.
+    Uses Desktop().windows() to safely handle multiple matches
+    instead of Application.connect() which throws on ambiguity.
+    """
     try:
-        import pywinauto
         from pywinauto import Desktop
-        windows = Desktop(backend="uia").windows()
-        return [(w.window_text(), w.class_name()) for w in windows if w.window_text().strip()]
+        all_wins = Desktop(backend="uia").windows()
+        matched = [w for w in all_wins if "Perplexity" in w.window_text()]
+        if DEBUG:
+            log("DEBUG", f"Found {len(matched)} Perplexity window(s):")
+            for i, w in enumerate(matched):
+                print(f"         [{i+1}] \"{w.window_text()}\"  [class: {w.class_name()}]  [handle: {w.handle}]")
+        return matched
     except Exception as e:
-        log("ERROR", f"Could not enumerate windows: {e}")
+        log("ERROR", f"Could not enumerate Perplexity windows: {e}")
         return []
 
 
-def check_perplexity_waiting() -> bool:
+def scan_window_for_triggers(win) -> list:
     """
-    Scan Perplexity window UI elements for approval prompt text.
-    In DEBUG mode, prints every element text found so you can tune TRIGGER_TEXTS.
+    Scan a single window's UI descendants for trigger texts.
+    Returns list of (element_text, matched_triggers) tuples.
     """
+    hits = []
+    all_texts = []
     try:
-        import pywinauto
-        app = pywinauto.Application(backend="uia").connect(title_re=".*Perplexity.*", timeout=2)
-        win = app.top_window()
-        win_title = win.window_text()
-
-        log("DEBUG", f"Connected to window: \"{win_title}\"") if DEBUG else None
-
-        all_texts = []
-        matched_triggers = []
-
         for elem in win.descendants():
             try:
                 text = elem.window_text().strip()
@@ -69,41 +67,66 @@ def check_perplexity_waiting() -> bool:
                 all_texts.append(text)
                 matched = [t for t in TRIGGER_TEXTS if t in text]
                 if matched:
-                    matched_triggers.append((text, matched))
+                    hits.append((text, matched))
             except Exception:
                 pass
-
-        if DEBUG:
-            log("DEBUG", f"Total UI elements with text: {len(all_texts)}")
-            log("DEBUG", "─── All element texts found ───")
-            for t in all_texts:
-                print(f"         └─ {repr(t)}")
-            if matched_triggers:
-                log("DEBUG", "─── TRIGGER MATCHES ───")
-                for text, triggers in matched_triggers:
-                    print(f"         🎯 Text: {repr(text)}  →  Triggers: {triggers}")
-            else:
-                log("DEBUG", "No trigger texts matched in this scan.")
-
-        return len(matched_triggers) > 0
-
-    except pywinauto.application.ProcessNotFoundError:
-        log("WARN", "Perplexity window not found — is the app running?") if DEBUG else None
-        return False
     except Exception as e:
-        log("ERROR", f"Unexpected error scanning window: {e}") if DEBUG else None
+        log("ERROR", f"Error scanning descendants: {e}")
+
+    if DEBUG:
+        log("DEBUG", f"  └─ {len(all_texts)} UI elements found")
+        for t in all_texts:
+            print(f"           └─ {repr(t)}")
+        if hits:
+            log("DEBUG", f"  └─ 🎯 TRIGGER MATCHES:")
+            for text, triggers in hits:
+                print(f"           🎯 {repr(text)}  →  {triggers}")
+        else:
+            log("DEBUG", "  └─ No triggers matched in this window.")
+
+    return hits
+
+
+def check_perplexity_waiting() -> bool:
+    """
+    Scan ALL Perplexity windows for approval prompt.
+    Returns True if any window has a trigger match.
+    """
+    windows = get_perplexity_windows()
+
+    if not windows:
+        if DEBUG:
+            log("WARN", "No Perplexity window found — is the app open?")
         return False
+
+    for i, win in enumerate(windows):
+        title = win.window_text()
+        if DEBUG:
+            log("DEBUG", f"Scanning window [{i+1}/{len(windows)}]: \"{title}\"")
+        hits = scan_window_for_triggers(win)
+        if hits:
+            log("ALERT", f"Trigger found in window \"{title}\"!") if DEBUG else None
+            return True
+
+    return False
 
 
 def list_open_windows():
-    """Debug utility: print all open window titles so you can verify Perplexity's exact title."""
-    log("DEBUG", "─── All open windows on this system ───")
-    windows = get_all_windows()
-    if not windows:
-        print("         (none found or pywinauto error)")
-    for title, cls in windows:
-        print(f"         └─ \"{title}\"  [class: {cls}]")
-    print()
+    """Debug utility: list all open windows."""
+    try:
+        from pywinauto import Desktop
+        log("DEBUG", "─── All open windows on this system ───")
+        windows = Desktop(backend="uia").windows()
+        visible = [w for w in windows if w.window_text().strip()]
+        if not visible:
+            print("         (none found)")
+        for w in visible:
+            marker = "  ⭐" if "Perplexity" in w.window_text() else ""
+            print(f"         └─ \"{w.window_text()}\"  [class: {w.class_name()}]{marker}")
+        print()
+        log("INFO", f"Perplexity windows highlighted with ⭐ above.")
+    except Exception as e:
+        log("ERROR", f"Could not list windows: {e}")
 
 
 def send_toast(title: str, message: str):
@@ -124,8 +147,7 @@ def send_phone_push(title: str, message: str):
             headers={"Title": title, "Tags": "warning,bell", "Priority": "urgent"},
             timeout=5
         )
-        if DEBUG:
-            log("OK", f"ntfy push sent → HTTP {r.status_code}")
+        log("OK", f"ntfy push sent → HTTP {r.status_code}") if DEBUG else None
     except Exception as e:
         log("ERROR", f"ntfy push failed: {e}")
 
@@ -134,18 +156,17 @@ def main():
     global DEBUG
 
     parser = argparse.ArgumentParser(description="Perplexity Approval Watcher")
-    parser.add_argument("--debug", action="store_true", help="Enable verbose debug output")
+    parser.add_argument("--debug",        action="store_true", help="Verbose debug output")
     parser.add_argument("--list-windows", action="store_true", help="List all open windows and exit")
-    parser.add_argument("--dry-run", action="store_true", help="Scan once and print results without sending alerts")
+    parser.add_argument("--dry-run",      action="store_true", help="Scan once, no alerts")
     args = parser.parse_args()
-
     DEBUG = args.debug
 
     print()
     print("=" * 55)
     print("  Perplexity Approval Watcher")
     print("=" * 55)
-    log("INFO", f"Debug mode   : {'ON' if DEBUG else 'OFF'  } (use --debug to enable)")
+    log("INFO", f"Debug mode   : {'ON' if DEBUG else 'OFF'}  (--debug to enable)")
     log("INFO", f"ntfy topic   : {NTFY_SERVER}/{NTFY_TOPIC}")
     log("INFO", f"Trigger texts: {TRIGGER_TEXTS}")
     log("INFO", f"Poll interval: {CHECK_INTERVAL}s")
@@ -153,20 +174,19 @@ def main():
     print("=" * 55)
     print()
 
-    # --list-windows: show all open windows and exit
     if args.list_windows:
         list_open_windows()
         return
 
-    # --dry-run: one scan, print everything, no alerts
     if args.dry_run:
-        log("INFO", "Dry-run mode — scanning once...")
+        log("INFO", "Dry-run: scanning all Perplexity windows once...")
         DEBUG = True
         result = check_perplexity_waiting()
-        log("INFO", f"Dry-run result: {'APPROVAL PROMPT DETECTED' if result else 'Nothing detected'}")
+        print()
+        log("INFO", f"Dry-run result: {'\U0001f6a8 APPROVAL PROMPT DETECTED' if result else '✅ Nothing detected — no prompt visible'}")
         return
 
-    log("INFO", "Watching... Press Ctrl+C to stop.\n")
+    log("INFO", "Watching all Perplexity windows... Press Ctrl+C to stop.\n")
 
     already_notified = False
     scan_count = 0
@@ -174,13 +194,13 @@ def main():
     while True:
         scan_count += 1
         if DEBUG:
-            log("DEBUG", f"Scan #{scan_count}")
+            log("DEBUG", f"--- Scan #{scan_count} ---")
 
         waiting = check_perplexity_waiting()
 
         if waiting and not already_notified:
             log("ALERT", "Approval prompt detected! Firing notifications...")
-            send_toast("⚠️ Perplexity Waiting!", "Approval required — switch to the app and approve/deny.")
+            send_toast("⚠️ Perplexity Waiting!", "Approval required — switch to app and approve/deny.")
             send_phone_push("⚠️ Perplexity Needs You!", "Approval prompt detected. Open Perplexity and approve/deny.")
             already_notified = True
 
