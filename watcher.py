@@ -15,7 +15,17 @@ except ImportError:
 NTFY_TOPIC      = "perplexity-prakadesh-alert"
 NTFY_SERVER     = "https://ntfy.sh"
 CHECK_INTERVAL  = 3
-TRIGGER_TEXTS   = ["Approve", "Deny", "waiting for input", "^Enter", "^Esc"]
+
+# EXACT trigger texts that only appear on the approval popup BUTTONS.
+# These are short, button-level strings. Do NOT put long phrases here
+# or they will match against page content text.
+# The approval popup shows: button "Approve" + hint "^Enter"
+#                           button "Deny"    + hint "^Esc"
+TRIGGER_TEXTS   = ["Approve", "Deny", "^Enter", "^Esc"]
+
+# Maximum character length for a UI element to be treated as a BUTTON.
+# Real buttons are short (< 30 chars). Long text is page content — skip it.
+MAX_TRIGGER_LEN = 30
 # ─────────────────────────────────────────────
 
 DEBUG = False
@@ -32,11 +42,7 @@ def log(level: str, msg: str):
 
 
 def get_perplexity_windows():
-    """
-    Return all windows whose title matches Perplexity.
-    Uses Desktop().windows() to safely handle multiple matches
-    instead of Application.connect() which throws on ambiguity.
-    """
+    """Return all windows whose title is exactly or contains 'Perplexity'."""
     try:
         from pywinauto import Desktop
         all_wins = Desktop(backend="uia").windows()
@@ -51,52 +57,76 @@ def get_perplexity_windows():
         return []
 
 
+def is_approval_button(text: str) -> tuple:
+    """
+    Check if a UI element text looks like an approval BUTTON, not page content.
+    Rules:
+      1. Text must be short (<= MAX_TRIGGER_LEN chars) — buttons are short labels.
+      2. Text must exactly match or contain a trigger word.
+      3. Text must not contain sentence punctuation (., !, ?) — buttons don't.
+    Returns (matched: bool, trigger_word: str)
+    """
+    if len(text) > MAX_TRIGGER_LEN:
+        return False, ""
+    # Reject anything that looks like a sentence
+    if any(c in text for c in [".", "!", "?", ",", "\n"]):
+        return False, ""
+    for trigger in TRIGGER_TEXTS:
+        # Exact match OR the text IS the trigger word (e.g. text == "Approve")
+        if text == trigger or text.strip() == trigger:
+            return True, trigger
+    return False, ""
+
+
 def scan_window_for_triggers(win) -> list:
     """
-    Scan a single window's UI descendants for trigger texts.
-    Returns list of (element_text, matched_triggers) tuples.
+    Scan window descendants. Only flag SHORT button-like elements.
+    Returns list of (element_text, trigger_word) tuples.
     """
     hits = []
-    all_texts = []
+    button_candidates = []
+    skipped_long = 0
+
     try:
         for elem in win.descendants():
             try:
                 text = elem.window_text().strip()
                 if not text:
                     continue
-                all_texts.append(text)
-                matched = [t for t in TRIGGER_TEXTS if t in text]
+
+                matched, trigger = is_approval_button(text)
+
                 if matched:
-                    hits.append((text, matched))
+                    hits.append((text, trigger))
+                    button_candidates.append((text, "MATCH"))
+                elif len(text) <= MAX_TRIGGER_LEN:
+                    button_candidates.append((text, "short-no-match"))
+                else:
+                    skipped_long += 1
+
             except Exception:
                 pass
     except Exception as e:
         log("ERROR", f"Error scanning descendants: {e}")
 
     if DEBUG:
-        log("DEBUG", f"  └─ {len(all_texts)} UI elements found")
-        for t in all_texts:
-            print(f"           └─ {repr(t)}")
-        if hits:
-            log("DEBUG", f"  └─ 🎯 TRIGGER MATCHES:")
-            for text, triggers in hits:
-                print(f"           🎯 {repr(text)}  →  {triggers}")
-        else:
-            log("DEBUG", "  └─ No triggers matched in this window.")
+        log("DEBUG", f"  └─ Short UI elements (buttons/labels): {len(button_candidates)}  |  Skipped long text: {skipped_long}")
+        log("DEBUG", "  └─ Short elements:")
+        for text, status in button_candidates:
+            marker = "  🎯 MATCH" if status == "MATCH" else ""
+            print(f"           [{status}] {repr(text)}{marker}")
+        if not hits:
+            log("DEBUG", "  └─ No approval buttons found in this window.")
 
     return hits
 
 
 def check_perplexity_waiting() -> bool:
-    """
-    Scan ALL Perplexity windows for approval prompt.
-    Returns True if any window has a trigger match.
-    """
+    """Scan ALL Perplexity windows. Return True only if a real approval button is found."""
     windows = get_perplexity_windows()
 
     if not windows:
-        if DEBUG:
-            log("WARN", "No Perplexity window found — is the app open?")
+        log("WARN", "No Perplexity window found — is the app open?") if DEBUG else None
         return False
 
     for i, win in enumerate(windows):
@@ -105,7 +135,7 @@ def check_perplexity_waiting() -> bool:
             log("DEBUG", f"Scanning window [{i+1}/{len(windows)}]: \"{title}\"")
         hits = scan_window_for_triggers(win)
         if hits:
-            log("ALERT", f"Trigger found in window \"{title}\"!") if DEBUG else None
+            log("ALERT", f"Approval button detected in \"{title}\": {hits}") if DEBUG else None
             return True
 
     return False
@@ -118,13 +148,11 @@ def list_open_windows():
         log("DEBUG", "─── All open windows on this system ───")
         windows = Desktop(backend="uia").windows()
         visible = [w for w in windows if w.window_text().strip()]
-        if not visible:
-            print("         (none found)")
         for w in visible:
             marker = "  ⭐" if "Perplexity" in w.window_text() else ""
             print(f"         └─ \"{w.window_text()}\"  [class: {w.class_name()}]{marker}")
         print()
-        log("INFO", f"Perplexity windows highlighted with ⭐ above.")
+        log("INFO", "Perplexity windows highlighted with ⭐")
     except Exception as e:
         log("ERROR", f"Could not list windows: {e}")
 
@@ -140,14 +168,24 @@ def send_toast(title: str, message: str):
 
 
 def send_phone_push(title: str, message: str):
+    """Send push via ntfy. Uses ASCII-safe strings to avoid latin-1 codec errors."""
     try:
+        # Strip emoji from title/message to avoid encoding issues in HTTP headers
+        safe_title   = title.encode("ascii", errors="ignore").decode("ascii")
+        safe_message = message.encode("utf-8")  # body is bytes, utf-8 safe
+
         r = requests.post(
             f"{NTFY_SERVER}/{NTFY_TOPIC}",
-            data=message.encode("utf-8"),
-            headers={"Title": title, "Tags": "warning,bell", "Priority": "urgent"},
+            data=safe_message,
+            headers={
+                "Title":    safe_title,
+                "Tags":     "warning,bell",
+                "Priority": "urgent",
+                "Content-Type": "text/plain; charset=utf-8"
+            },
             timeout=5
         )
-        log("OK", f"ntfy push sent → HTTP {r.status_code}") if DEBUG else None
+        log("OK", f"ntfy push sent -> HTTP {r.status_code}") if DEBUG else None
     except Exception as e:
         log("ERROR", f"ntfy push failed: {e}")
 
@@ -166,11 +204,12 @@ def main():
     print("=" * 55)
     print("  Perplexity Approval Watcher")
     print("=" * 55)
-    log("INFO", f"Debug mode   : {'ON' if DEBUG else 'OFF'}  (--debug to enable)")
-    log("INFO", f"ntfy topic   : {NTFY_SERVER}/{NTFY_TOPIC}")
-    log("INFO", f"Trigger texts: {TRIGGER_TEXTS}")
-    log("INFO", f"Poll interval: {CHECK_INTERVAL}s")
-    log("INFO", f"winotify     : {'available' if WINOTIFY_AVAILABLE else 'NOT installed'}")
+    log("INFO", f"Debug mode     : {'ON' if DEBUG else 'OFF'}  (--debug to enable)")
+    log("INFO", f"ntfy topic     : {NTFY_SERVER}/{NTFY_TOPIC}")
+    log("INFO", f"Trigger texts  : {TRIGGER_TEXTS}")
+    log("INFO", f"Max btn length : {MAX_TRIGGER_LEN} chars (longer = page content, ignored)")
+    log("INFO", f"Poll interval  : {CHECK_INTERVAL}s")
+    log("INFO", f"winotify       : {'available' if WINOTIFY_AVAILABLE else 'NOT installed'}")
     print("=" * 55)
     print()
 
@@ -183,7 +222,7 @@ def main():
         DEBUG = True
         result = check_perplexity_waiting()
         print()
-        log("INFO", f"Dry-run result: {'\U0001f6a8 APPROVAL PROMPT DETECTED' if result else '✅ Nothing detected — no prompt visible'}")
+        log("INFO", f"Dry-run result: {'APPROVAL PROMPT DETECTED' if result else 'Nothing detected - no approval prompt visible'}")
         return
 
     log("INFO", "Watching all Perplexity windows... Press Ctrl+C to stop.\n")
@@ -200,16 +239,16 @@ def main():
 
         if waiting and not already_notified:
             log("ALERT", "Approval prompt detected! Firing notifications...")
-            send_toast("⚠️ Perplexity Waiting!", "Approval required — switch to app and approve/deny.")
-            send_phone_push("⚠️ Perplexity Needs You!", "Approval prompt detected. Open Perplexity and approve/deny.")
+            send_toast("Perplexity Waiting!", "Approval required - switch to app and approve/deny.")
+            send_phone_push("Perplexity Needs You!", "Approval prompt detected. Open Perplexity and approve/deny the action.")
             already_notified = True
 
         elif not waiting and already_notified:
-            log("OK", "Prompt resolved — resuming watch.")
+            log("OK", "Prompt resolved - resuming watch.")
             already_notified = False
 
         elif not waiting and not already_notified and DEBUG:
-            log("DEBUG", "No prompt detected. Sleeping...\n")
+            log("DEBUG", "No approval button detected. Sleeping...\n")
 
         time.sleep(CHECK_INTERVAL)
 
