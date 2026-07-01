@@ -4,7 +4,7 @@
 
 When you run an agentic task in [Perplexity Computer](https://www.perplexity.ai), it sometimes pauses and waits silently for your **Approve / Deny** input before continuing. If you switch to another window, you'll never know it's waiting — no sound, no alert, nothing.
 
-This tool watches the Perplexity window in the background and fires an instant notification the moment that popup appears.
+This tool watches the Perplexity window in the background and fires an instant notification the moment that popup appears — and **keeps reminding you every 2 minutes** until you respond.
 
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue?logo=python) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey?logo=windows) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -21,6 +21,23 @@ The watcher uses [`pywinauto`](https://pywinauto.readthedocs.io/) to scan all op
 | `Deny` | The deny button is on screen |
 
 This 3-way co-presence check eliminates false positives from page content that may contain the words "Approve" or "Deny".
+
+### Alert + Reminder Flow
+
+```
+Popup appears
+     │
+     ▼
+🚨 Initial alert  →  Windows toast + phone push
+     │
+     │  (popup still not dismissed after 2 min)
+     ▼
+🔁 Reminder alert  →  Toast + push with elapsed time  ("waiting 2m 3s")
+     │
+     │  (every 2 min until dismissed)
+     ▼
+✅ Popup dismissed  →  Watcher resets, back to monitoring
+```
 
 When triggered, two alerts fire at once:
 - 🔔 **Windows Toast** — native popup with sound, works even if the app is minimized
@@ -74,7 +91,7 @@ Open the app → tap **+** → subscribe to your topic name (e.g. `perplexity-yo
 python watcher.py
 ```
 
-Leave it running in the background. It uses minimal CPU (sleeps 3s between scans) and will alert you instantly whenever Perplexity is waiting for your input.
+Leave it running in the background. It uses minimal CPU (sleeps 3s between scans) and will alert you the moment Perplexity is waiting — then remind you every 2 minutes until you respond.
 
 ---
 
@@ -87,6 +104,7 @@ All config is at the top of `watcher.py`:
 | `NTFY_TOPIC` | `perplexity-prakadesh-alert` | Your unique ntfy topic name |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy server URL (supports self-hosted) |
 | `CHECK_INTERVAL` | `3` | Seconds between window scans |
+| `REMINDER_INTERVAL` | `120` | Seconds before re-alerting if popup not dismissed |
 | `REQUIRED_COMBO` | `{"Awaiting response", "Approve", "Deny"}` | All three must be present to fire alert |
 | `MAX_BTN_LEN` | `30` | Max chars for a UI element to be treated as a button |
 
@@ -105,6 +123,17 @@ python watcher.py [options]
 | `--verbose` | Dump all short UI elements per scan (for deep debugging) |
 | `--dry-run` | Scan once and print result — no alerts fired |
 | `--list-windows` | List all open windows on your system and exit |
+| `--reminder N` | Override reminder interval to `N` seconds (default: 120) |
+
+### Examples
+
+```bash
+# Remind every 30 seconds instead of 2 minutes
+python watcher.py --reminder 30
+
+# Debug mode with custom reminder
+python watcher.py --debug --reminder 60
+```
 
 ### First-time troubleshooting flow
 
@@ -153,17 +182,20 @@ Then update `NTFY_SERVER` in `watcher.py` to your server URL.
 
 ## FAQ
 
-**Q: Does this work if Perplexity is open in multiple browser windows?**
+**Q: Does this work if Perplexity is open in multiple browser windows?**  
 Yes. The watcher scans all windows titled "Perplexity" and checks each one.
 
-**Q: Will it send duplicate alerts?**
-No. Once an alert fires, it won't fire again until the popup is dismissed and a new one appears.
+**Q: Will it send duplicate alerts?**  
+No. The initial alert fires once. After that, reminders fire on the `REMINDER_INTERVAL` schedule until the popup is dismissed.
 
-**Q: Does it work with the Perplexity desktop app?**
+**Q: Does it work with the Perplexity desktop app?**  
 Yes, as long as the window title contains "Perplexity". Works with browser-based and Electron-based versions.
 
-**Q: What if my browser window title is different?**
+**Q: What if my browser window title is different?**  
 Run `python watcher.py --list-windows` to see your exact window titles. If "Perplexity" doesn't appear, update the filter in `get_perplexity_windows()` in `watcher.py`.
+
+**Q: Can I change the reminder interval?**  
+Yes — either edit `REMINDER_INTERVAL` in `watcher.py`, or pass `--reminder N` on the command line.
 
 ---
 
