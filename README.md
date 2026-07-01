@@ -1,85 +1,178 @@
 # Perplexity Approval Notifier
 
-A lightweight background watcher that detects when the **Perplexity desktop app** is waiting for your **Approve / Deny** input during an agentic task — and immediately alerts you via:
+> Never miss a Perplexity approval prompt again.
 
-- 🔔 **Windows Toast Notification** (on-screen popup with sound)
-- 📱 **Phone Push Notification** via [ntfy.sh](https://ntfy.sh) (free, no account needed)
+When you run an agentic task in [Perplexity Computer](https://www.perplexity.ai), it sometimes pauses and waits silently for your **Approve / Deny** input before continuing. If you switch to another window, you'll never know it's waiting — no sound, no alert, nothing.
 
-No more silently stalled Perplexity sessions while you're working on something else.
+This tool watches the Perplexity window in the background and fires an instant notification the moment that popup appears.
+
+![Python](https://img.shields.io/badge/python-3.8%2B-blue?logo=python) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey?logo=windows) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
 ## How It Works
 
-The script uses `pywinauto` to scan the Perplexity window's UI elements every 3 seconds. When it detects trigger text like `Approve`, `Deny`, or `^Enter`, it fires both a toast and a phone notification.
+The watcher uses [`pywinauto`](https://pywinauto.readthedocs.io/) to scan all open Perplexity windows every 3 seconds. It fires an alert **only** when all three of these UI elements are present simultaneously:
 
----
+| Element | What it means |
+|---|---|
+| `Awaiting response` | Perplexity is mid-task, waiting |
+| `Approve` | The approval button is on screen |
+| `Deny` | The deny button is on screen |
 
-## Setup
+This 3-way co-presence check eliminates false positives from page content that may contain the words "Approve" or "Deny".
 
-### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Configure Your ntfy Topic
-
-Edit `watcher.py` and change:
-
-```python
-NTFY_TOPIC = "perplexity-prakadesh-alert"   # pick a unique topic name
-```
-
-### 3. Install ntfy on Your Phone
-
-- [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)
-- [iOS](https://apps.apple.com/app/ntfy/id1625396347)
-
-Open the app → **Subscribe** to your topic (e.g. `perplexity-prakadesh-alert`).
-
-### 4. Run the Watcher
-
-```bash
-python watcher.py
-```
-
-Keep it running in the background whenever you start a Perplexity agentic session.
-
----
-
-## Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `NTFY_TOPIC` | `perplexity-prakadesh-alert` | Your unique ntfy topic |
-| `NTFY_SERVER` | `https://ntfy.sh` | ntfy server (or self-hosted) |
-| `CHECK_INTERVAL` | `3` | Seconds between checks |
-| `TRIGGER_TEXTS` | `["Approve", "Deny", ...]` | Texts to watch for in the window |
-
----
-
-## Auto-Start on Boot (Windows)
-
-To run automatically on startup, create a shortcut to:
-
-```
-pythonw.exe C:\path\to\watcher.py
-```
-
-Place it in: `shell:startup` (press Win+R, type `shell:startup`)
+When triggered, two alerts fire at once:
+- 🔔 **Windows Toast** — native popup with sound, works even if the app is minimized
+- 📱 **Phone Push** — instant notification via [ntfy.sh](https://ntfy.sh) (free, no account needed)
 
 ---
 
 ## Requirements
 
-- Windows 10/11
+- Windows 10 / 11
 - Python 3.8+
-- Perplexity desktop app running
-- Internet connection (for ntfy push)
+- Perplexity open in a browser (Chrome, Brave, Edge, etc.)
+- Internet connection (for phone push via ntfy)
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/prakadesh/perplexity-approval-notifier
+cd perplexity-approval-notifier
+pip install -r requirements.txt
+```
+
+---
+
+## Setup
+
+### 1. Pick a unique ntfy topic name
+
+Open `watcher.py` and change this line to something personal and unique:
+
+```python
+NTFY_TOPIC = "perplexity-yourname-alert"   # e.g. perplexity-john-2025
+```
+
+> Your topic name acts like a private channel. Anyone who knows it can subscribe, so make it non-obvious.
+
+### 2. Install ntfy on your phone
+
+| Platform | Link |
+|---|---|
+| Android | [Google Play](https://play.google.com/store/apps/details?id=io.heckel.ntfy) |
+| iOS | [App Store](https://apps.apple.com/app/ntfy/id1625396347) |
+
+Open the app → tap **+** → subscribe to your topic name (e.g. `perplexity-yourname-alert`).
+
+### 3. Run the watcher
+
+```bash
+python watcher.py
+```
+
+Leave it running in the background. It uses minimal CPU (sleeps 3s between scans) and will alert you instantly whenever Perplexity is waiting for your input.
+
+---
+
+## Configuration
+
+All config is at the top of `watcher.py`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `NTFY_TOPIC` | `perplexity-prakadesh-alert` | Your unique ntfy topic name |
+| `NTFY_SERVER` | `https://ntfy.sh` | ntfy server URL (supports self-hosted) |
+| `CHECK_INTERVAL` | `3` | Seconds between window scans |
+| `REQUIRED_COMBO` | `{"Awaiting response", "Approve", "Deny"}` | All three must be present to fire alert |
+| `MAX_BTN_LEN` | `30` | Max chars for a UI element to be treated as a button |
+
+---
+
+## CLI Reference
+
+```
+python watcher.py [options]
+```
+
+| Flag | Description |
+|---|---|
+| *(no flags)* | Normal run — silent background watcher |
+| `--debug` | Show combo detection status per scan (clean summary) |
+| `--verbose` | Dump all short UI elements per scan (for deep debugging) |
+| `--dry-run` | Scan once and print result — no alerts fired |
+| `--list-windows` | List all open windows on your system and exit |
+
+### First-time troubleshooting flow
+
+```bash
+# Step 1: Confirm Perplexity window is detected
+python watcher.py --list-windows
+
+# Step 2: Trigger an approval prompt in Perplexity, then run:
+python watcher.py --dry-run
+
+# Step 3: Watch live with status output
+python watcher.py --debug
+
+# Step 4: Normal run once confirmed working
+python watcher.py
+```
+
+---
+
+## Auto-Start on Boot (Optional)
+
+To run automatically every time Windows starts:
+
+1. Press `Win + R`, type `shell:startup`, press Enter
+2. Create a shortcut in that folder pointing to:
+
+```
+pythonw.exe C:\full\path\to\watcher.py
+```
+
+> Use `pythonw.exe` (not `python.exe`) so no terminal window appears.
+
+---
+
+## Self-Hosted ntfy (Optional)
+
+If you prefer not to use the public ntfy.sh server, you can self-host:
+
+```bash
+docker run -p 80:80 -v /var/cache/ntfy:/var/cache/ntfy binwiederhier/ntfy serve
+```
+
+Then update `NTFY_SERVER` in `watcher.py` to your server URL.
+
+---
+
+## FAQ
+
+**Q: Does this work if Perplexity is open in multiple browser windows?**
+Yes. The watcher scans all windows titled "Perplexity" and checks each one.
+
+**Q: Will it send duplicate alerts?**
+No. Once an alert fires, it won't fire again until the popup is dismissed and a new one appears.
+
+**Q: Does it work with the Perplexity desktop app?**
+Yes, as long as the window title contains "Perplexity". Works with browser-based and Electron-based versions.
+
+**Q: What if my browser window title is different?**
+Run `python watcher.py --list-windows` to see your exact window titles. If "Perplexity" doesn't appear, update the filter in `get_perplexity_windows()` in `watcher.py`.
+
+---
+
+## Contributing
+
+Pull requests are welcome. For major changes, open an issue first to discuss what you'd like to change.
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
